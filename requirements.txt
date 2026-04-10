@@ -1,0 +1,6 @@
+flask 
+flask-socketio 
+scikit-learn 
+numpy 
+werkzeug 
+eventlet

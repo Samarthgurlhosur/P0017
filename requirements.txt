@@ -1,8 +1,8 @@
-flask
-flask-socketio
-scikit-learn
-numpy
-werkzeug
+flask 
+flask-socketio 
+scikit-learn 
+numpy 
+werkzeug 
 eventlet
 opencv-python
 pillow

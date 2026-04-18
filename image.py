@@ -6,13 +6,27 @@ import io
 
 __all__ = ["detect_threats", "apply_xray_effect", "verify_progress", "get_xray_frame", "generate_explainable_annotation"]
 
-# Import YOLO for real object detection
+# YOLO availability flag
+YOLO_AVAILABLE = False
+
+# Check YOLO availability without importing
 try:
-    from ultralytics import YOLO
-    YOLO_AVAILABLE = True
-except ImportError:
-    YOLO_AVAILABLE = False
-    print("Warning: ultralytics not available. Using fallback detection.")
+    import sys
+    ultralytics_spec = sys.modules.get('ultralytics')
+    if ultralytics_spec is None:
+        # Try to find ultralytics
+        import importlib.util
+        spec = importlib.util.find_spec('ultralytics')
+        if spec is not None:
+            YOLO_AVAILABLE = True
+            print("✓ YOLOv8 library available")
+        else:
+            raise ImportError("ultralytics not found")
+    else:
+        YOLO_AVAILABLE = True
+        print("✓ YOLOv8 library available")
+except ImportError as e:
+    print(f"⚠️ YOLO not available: {e}. Using fallback detection mode.")
 
 # Global YOLO model (loaded once for performance)
 yolo_model = None
@@ -35,33 +49,15 @@ def load_yolo_model():
     """Load YOLOv8 model for object detection"""
     global yolo_model
     if not YOLO_AVAILABLE:
+        print("YOLO not available, using fallback detection")
         return None
-    
+
     try:
         if yolo_model is None:
             from ultralytics import YOLO
             # Use YOLOv8 small model (faster inference)
-            # Try multiple possible paths for the model file
-            import os
-            possible_paths = [
-                'yolov8s.pt',
-                '../yolov8s.pt',
-                os.path.join(os.path.dirname(__file__), '..', 'yolov8s.pt'),
-            ]
-            
-            model_path = None
-            for path in possible_paths:
-                if os.path.exists(path):
-                    model_path = path
-                    break
-            
-            if model_path is None:
-                # If file not found, YOLO will try to download it automatically
-                print("Model file not found locally, attempting to download...")
-                model_path = 'yolov8s.pt'
-            
-            yolo_model = YOLO(model_path)  # Small model
-            print(f"✓ YOLOv8 model loaded successfully from {model_path}")
+            yolo_model = YOLO('yolov8s.pt')  # Small model
+            print("✓ YOLOv8 model loaded successfully")
         return yolo_model
     except Exception as e:
         print(f"Error loading YOLO model: {e}")
@@ -210,17 +206,18 @@ def detect_threats_from_frame(frame, image_id="temp"):
     """
     Detect threats in a frame using YOLOv8.
     Real detection with bounding boxes and threat classification.
+    Enhanced for better gun and knife detection.
     """
     detections = []
     annotated_frame = frame.copy()
-    
+
     try:
         model = load_yolo_model()
-        
+
         if model is not None:
-            # Run YOLO detection
-            results = model(frame, conf=0.4, verbose=False)
-            
+            # Run YOLO detection with lower confidence for weapons
+            results = model(frame, conf=0.25, verbose=False)  # Lower threshold for better detection
+
             # Process results
             for result in results:
                 boxes = result.boxes
@@ -228,54 +225,72 @@ def detect_threats_from_frame(frame, image_id="temp"):
                     # Get box coordinates
                     x1, y1, x2, y2 = box.xyxy[0]
                     x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-                    
+
                     # Get class name and confidence
                     class_name = result.names[int(box.cls[0])]
                     confidence = float(box.conf[0])
-                    
+
                     # Check if this is a threat/suspicious item
                     is_threat = False
                     severity = "INFO"
                     color = (100, 100, 100)
-                    
-                    # Check if it's a dangerous item
+
+                    # Enhanced weapon detection with more keywords
                     class_lower = class_name.lower()
-                    if any(threat in class_lower for threat in ["knife", "gun", "pistol", "rifle", "bomb", "weapon", "scissors", "axe", "sword", "baton"]):
+                    weapon_keywords = [
+                        "knife", "gun", "pistol", "rifle", "revolver", "shotgun",
+                        "weapon", "firearm", "blade", "sword", "axe", "hammer",
+                        "scissors", "dagger", "baton", "crowbar", "pipe", "stick",
+                        "bomb", "explosive", "grenade", "mine", "c4", "dynamite"
+                    ]
+
+                    if any(threat in class_lower for threat in weapon_keywords):
                         is_threat = True
-                        if any(critical in class_lower for critical in ["gun", "pistol", "rifle", "bomb", "explosive"]):
+                        if any(critical in class_lower for critical in [
+                            "gun", "pistol", "rifle", "revolver", "shotgun", "firearm",
+                            "bomb", "explosive", "grenade", "mine", "c4", "dynamite"
+                        ]):
                             severity = "CRITICAL"
                             color = (0, 0, 255)  # Red
                         else:
                             severity = "HIGH"
                             color = (0, 165, 255)  # Orange
-                    elif any(suspicious in class_lower for suspicious in ["backpack", "handbag", "bag", "suitcase", "luggage"]):
+                    elif any(suspicious in class_lower for suspicious in ["backpack", "handbag", "bag", "suitcase", "luggage", "briefcase"]):
                         # Bags are suspicious (could contain items)
                         is_threat = True
                         severity = "SCANNING"
                         color = (0, 255, 255)  # Cyan
-                    elif any(chemical in class_lower for chemical in ["bottle", "can", "container", "flask"]):
+                    elif any(chemical in class_lower for chemical in ["bottle", "can", "container", "flask", "spray", "chemical"]):
                         # Containers could hold dangerous liquids
                         is_threat = True
                         severity = "WARNING"
                         color = (0, 255, 100)  # Green
-                    
-                    # Draw bounding box
-                    cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
-                    
-                    # Add label
-                    label = f"{class_name}: {confidence:.2f}"
-                    cv2.putText(annotated_frame, label, (x1, y1 - 10),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-                    
+
+                    # Draw bounding box with thicker lines for threats
+                    if is_threat:
+                        thickness = 3 if severity == "CRITICAL" else 2
+                        cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, thickness)
+
+                        # Add label with severity indicator
+                        severity_icon = "🚨" if severity == "CRITICAL" else "⚠️" if severity == "HIGH" else "🔍"
+                        label = f"{severity_icon} {class_name}: {confidence:.2f} ({severity})"
+                        cv2.putText(annotated_frame, label, (x1, y1 - 10),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+                        # Add confidence bar
+                        bar_width = int((x2 - x1) * confidence)
+                        cv2.rectangle(annotated_frame, (x1, y2 + 5), (x1 + bar_width, y2 + 15), color, -1)
+
                     # Add to detections if threat
-                    if is_threat or severity == "SCANNING":
+                    if is_threat:
                         detections.append({
                             "item": class_name,
                             "severity": severity,
                             "confidence": round(confidence, 3),
                             "bbox": [x1, y1, x2, y2],
                             "color": f"#{color[2]:02x}{color[1]:02x}{color[0]:02x}",
-                            "timestamp": __import__('datetime').datetime.now().isoformat()
+                            "timestamp": __import__('datetime').datetime.now().isoformat(),
+                            "threat_detected": True
                         })
 
             # If YOLO is loaded but returns nothing, use fallback as backup
@@ -285,21 +300,21 @@ def detect_threats_from_frame(frame, image_id="temp"):
             # Fallback: simple heuristic detection
             print("Using fallback detection mode")
             detections = fallback_detect_threats(frame)
-    
+
     except Exception as e:
         print(f"YOLO detection error: {e}")
         detections = []
-    
+
     # Apply bag see-through effect if bags are detected
     if detections:
-        bag_detections = [d for d in detections if d.get("item", "").lower() in ["backpack", "handbag", "bag", "suitcase", "luggage"]]
+        bag_detections = [d for d in detections if d.get("item", "").lower() in ["backpack", "handbag", "bag", "suitcase", "luggage", "briefcase"]]
         if bag_detections:
             annotated_frame = apply_bag_see_through_effect(annotated_frame, detections)
-    
+
     # Generate explainable annotations with detailed reasoning
     if detections:
         annotated_frame = generate_explainable_annotation(annotated_frame, detections)
-    
+
     return {
         "detections": detections,
         "annotated_frame": annotated_frame
@@ -462,83 +477,161 @@ def generate_explainable_annotation(frame, detections):
 
 def fallback_detect_threats(frame):
     """
-    Fallback detection using color and shape analysis.
-    Used when YOLO is not available or returns no threats.
+    Enhanced fallback detection using advanced color and shape analysis.
+    Specifically tuned for knife and gun detection when YOLO is not available.
     """
     detections = []
-    
+
     try:
         # Convert to HSV for better color detection
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        
-        # Detect dark metallic objects (potential weapons)
+
+        # Detect dark metallic objects (potential weapons) - expanded range
         lower_dark = np.array([0, 0, 0])
-        upper_dark = np.array([180, 255, 80])
+        upper_dark = np.array([180, 255, 120])  # Increased brightness threshold
         dark_mask = cv2.inRange(hsv, lower_dark, upper_dark)
-        
-        # Detect bright/reflective metallic items
-        lower_bright = np.array([0, 0, 180])
-        upper_bright = np.array([180, 60, 255])
+
+        # Detect bright/reflective metallic items - expanded range
+        lower_bright = np.array([0, 0, 150])  # Lowered threshold
+        upper_bright = np.array([180, 80, 255])
         bright_mask = cv2.inRange(hsv, lower_bright, upper_bright)
-        
-        # Combine masks and emphasize strong edges
+
+        # Detect gunmetal gray colors (common for firearms)
+        lower_gunmetal = np.array([0, 10, 40])
+        upper_gunmetal = np.array([180, 60, 120])
+        gunmetal_mask = cv2.inRange(hsv, lower_gunmetal, upper_gunmetal)
+
+        # Combine all masks
         combined_mask = cv2.bitwise_or(dark_mask, bright_mask)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        combined_mask = cv2.bitwise_or(combined_mask, gunmetal_mask)
+
+        # Apply morphological operations to clean up noise
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
         combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
-        combined_mask = cv2.GaussianBlur(combined_mask, (5, 5), 0)
-        _, combined_mask = cv2.threshold(combined_mask, 60, 255, cv2.THRESH_BINARY)
-        
+
+        # Find contours
         contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
+
         for contour in contours:
             area = cv2.contourArea(contour)
-            if area < 800:
+            if area < 500:  # Lower threshold for smaller objects
                 continue
-                
+
+            # Skip contours that are too large (likely background)
+            frame_area = frame.shape[0] * frame.shape[1]
+            if area > frame_area * 0.8:  # Skip if >80% of frame
+                continue
+
             x, y, w, h = cv2.boundingRect(contour)
-            aspect_ratio = float(max(w, h)) / (min(w, h) + 1)
+            aspect_ratio = float(max(w, h)) / (min(w, h) + 1e-6)
             perimeter = cv2.arcLength(contour, True)
             solidity = area / (cv2.contourArea(cv2.convexHull(contour)) + 1e-6)
-            
+
+            # Enhanced detection logic for knives and guns
             item = "Suspicious Object"
             severity = "WARNING"
             confidence = 0.45
             color = (0, 255, 100)
-            
-            if aspect_ratio > 4.0 and area > 1200 and solidity > 0.2:
+
+            # Knife detection: Long, thin objects with high aspect ratio (check first)
+            if aspect_ratio > 3.0 and area > 800 and solidity > 0.25 and w > h * 2:
                 item = "Knife"
                 severity = "HIGH"
-                confidence = 0.78
+                confidence = 0.82
                 color = (0, 165, 255)
-            elif aspect_ratio > 2.0 and area > 1600 and solidity > 0.18:
-                item = "Gun"
-                severity = "CRITICAL"
-                confidence = 0.85
-                color = (0, 0, 255)
-            elif area > 3000 and aspect_ratio > 1.2:
+                print(f"🔪 KNIFE DETECTED: Aspect ratio {aspect_ratio:.1f}, area {area:.0f}")
+
+            # Gun detection: Specific shape characteristics for firearms
+            elif (aspect_ratio > 1.8 and aspect_ratio < 4.0 and area > 1200 and
+                  solidity > 0.3 and w > 50 and h > 30):
+                # Additional checks for gun-like shapes
+                rect_area = w * h
+                fill_ratio = area / rect_area if rect_area > 0 else 0
+
+                if fill_ratio > 0.4:  # Guns tend to be more solid
+                    item = "Gun"
+                    severity = "CRITICAL"
+                    confidence = 0.88
+                    color = (0, 0, 255)
+                    print(f"🔫 GUN DETECTED: Aspect ratio {aspect_ratio:.1f}, area {area:.0f}, fill ratio {fill_ratio:.2f}")
+
+            # Large suspicious metallic objects (only if not already classified as weapon)
+            elif area > 2500 and aspect_ratio > 1.1:
                 item = "Suspicious Metallic Object"
                 severity = "HIGH"
-                confidence = 0.72
+                confidence = 0.75
                 color = (0, 165, 255)
-            else:
-                # If contour is large and dark but not strongly elongated, still flag for manual review.
+
+            # Medium suspicious items
+            elif area > 1200:
                 item = "Suspicious Item"
                 severity = "WARNING"
-                confidence = 0.52
+                confidence = 0.55
                 color = (255, 165, 0)
-                
-            detections.append({
-                "item": item,
-                "severity": severity,
-                "confidence": confidence,
-                "bbox": [x, y, x + w, y + h],
-                "color": f"#{color[2]:02x}{color[1]:02x}{color[0]:02x}",
-                "timestamp": __import__('datetime').datetime.now().isoformat()
-            })
+
+            # Only add detections that are likely threats - be more conservative for safe images
+            # Only add CRITICAL threats (guns) or HIGH severity knives
+            if (severity == "CRITICAL") or (severity == "HIGH" and item == "Knife"):
+                detections.append({
+                    "item": item,
+                    "severity": severity,
+                    "confidence": confidence,
+                    "bbox": [x, y, x + w, y + h],
+                    "color": f"#{color[2]:02x}{color[1]:02x}{color[0]:02x}",
+                    "timestamp": __import__('datetime').datetime.now().isoformat(),
+                    "threat_detected": True
+                })
+            # Don't add WARNING detections or generic HIGH severity detections for safe images
+
+        # If no threats found with shape analysis, try edge-based detection
+        if not detections:
+            detections = fallback_edge_detection(frame)
+
     except Exception as e:
         print(f"Fallback detection error: {e}")
-    
+
+    return detections
+
+
+def fallback_edge_detection(frame):
+    """
+    Additional fallback using edge detection for weapon identification.
+    """
+    detections = []
+
+    try:
+        # Convert to grayscale and detect edges
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 50, 150)
+
+        # Find contours in edges
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < 300:
+                continue
+
+            x, y, w, h = cv2.boundingRect(contour)
+            aspect_ratio = float(max(w, h)) / (min(w, h) + 1e-6)
+
+            # Look for elongated shapes that could be knives
+            if aspect_ratio > 4.0 and w > 40 and h > 10:
+                detections.append({
+                    "item": "Knife (Edge Detection)",
+                    "severity": "HIGH",
+                    "confidence": 0.65,
+                    "bbox": [x, y, x + w, y + h],
+                    "color": "#ffa500",
+                    "timestamp": __import__('datetime').datetime.now().isoformat(),
+                    "threat_detected": True
+                })
+                print(f"🔪 KNIFE DETECTED (Edge): Aspect ratio {aspect_ratio:.1f}")
+
+    except Exception as e:
+        print(f"Edge detection error: {e}")
+
     return detections
 
 def get_xray_frame(frame):

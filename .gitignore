@@ -1,0 +1,19 @@
+# Virtual environments
+venv/
+.venv/
+**/.venv/
+**/venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# VS Code
+.vscode/
+
+# Uploads
+uploads/
+
+# OS junk
+.DS_Store
+Thumbs.db
